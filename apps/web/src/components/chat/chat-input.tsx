@@ -11,6 +11,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { getActiveModels } from "@/lib/models";
+import {
+  EFFORT_LABELS,
+  getEffortCapability,
+  resolveEffortFor,
+  type EffortLevel,
+} from "@/lib/reasoning";
 import { useChatStore, type ContextFile } from "@/stores/chat-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { expandPromptInput } from "@/lib/prompts/expand-prompt";
@@ -35,16 +41,13 @@ interface ChatInputProps {
 
 export function ChatInput({ onSend, disabled, isLoopActive, onStop, contextFiles = [], onAddFiles, onRemoveFile }: ChatInputProps) {
   const { model, setModel } = useChatStore();
-  const contextBudget = useChatStore((s) => s.contextBudget);
   const contextWindowTrimmed = useChatStore((s) => s.contextWindowTrimmed);
-  const contextUsedPct =
-    contextBudget && contextBudget.available > 0
-      ? Math.min(100, Math.round((contextBudget.used / contextBudget.available) * 100))
-      : null;
-  const { localLLM, selectedModels, transcriptionModel, apiKeys } = useSettingsStore();
+  const { localLLM, selectedModels, transcriptionModel, apiKeys, modelEffort, setModelEffort } =
+    useSettingsStore();
   const activeModels = getActiveModels(selectedModels);
   const [input, setInput] = React.useState("");
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
+  const [effortMenuOpen, setEffortMenuOpen] = React.useState(false);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
   const selectedModel = activeModels.find((m) => m.id === model) ?? activeModels[0];
@@ -52,7 +55,19 @@ export function ChatInput({ onSend, disabled, isLoopActive, onStop, contextFiles
   const localModelLabel = localLLM.model.trim() || `${localProviderLabel} (default)`;
   const selectedLocalLabel = localLLM.enabled ? localModelLabel : "Local LLM (disabled)";
   const selectedModelLabel =
-    model === "local" ? selectedLocalLabel : (selectedModel?.name ?? model);
+    model === "local" ? selectedLocalLabel : (selectedModel?.name ?? model) || "No model";
+
+  // Reasoning effort is contextual: only models known to be reasoning models get
+  // a picker, and only with the levels that model actually supports.
+  // Local models are never reasoning models (see buildLocalModel in chat-store).
+  // Matched on the exact id — `selectedModel` falls back to the first active
+  // model for display, but effort keys off what the request will actually send.
+  const effortModel = activeModels.find((m) => m.id === model);
+  const effortCapability = effortModel ? getEffortCapability(effortModel) : null;
+  const effortLevels = effortCapability?.levels ?? [];
+  const effort = effortCapability
+    ? resolveEffortFor(effortCapability, modelEffort?.[model])
+    : "off";
 
   const adjustHeight = React.useCallback(() => {
     const textarea = textareaRef.current;
@@ -176,6 +191,11 @@ export function ChatInput({ onSend, disabled, isLoopActive, onStop, contextFiles
                 <ChevronDown className="ml-1 h-3 w-3" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-auto">
+                {activeModels.length === 0 && (
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground whitespace-nowrap">
+                    No models selected — add some in Settings → Models.
+                  </div>
+                )}
                 <DropdownMenuRadioGroup value={model} onValueChange={(v) => { setModel(v); setModelMenuOpen(false); }}>
                   {activeModels.map((m) => (
                     <DropdownMenuRadioItem key={m.id} value={m.id} className="whitespace-nowrap">
@@ -198,15 +218,46 @@ export function ChatInput({ onSend, disabled, isLoopActive, onStop, contextFiles
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {/* Context-window usage + sliding-window indicator */}
-            {contextUsedPct !== null && (
-              <span
-                className="text-xs text-muted-foreground tabular-nums"
-                title="Estimated context-window usage"
-              >
-                {contextUsedPct}%
-              </span>
+            {/* Reasoning effort — only for models that support it */}
+            {effortLevels.length > 0 && (
+              <DropdownMenu open={effortMenuOpen} onOpenChange={setEffortMenuOpen}>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      disabled={disabled}
+                      title="Reasoning effort"
+                    />
+                  }
+                >
+                  <span>{EFFORT_LABELS[effort]}</span>
+                  <ChevronDown className="ml-1 h-3 w-3" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-auto">
+                  <DropdownMenuRadioGroup
+                    value={effort}
+                    onValueChange={(v) => {
+                      setModelEffort(model, v as EffortLevel);
+                      setEffortMenuOpen(false);
+                    }}
+                  >
+                    {effortLevels.map((level) => (
+                      <DropdownMenuRadioItem
+                        key={level}
+                        value={level}
+                        className="whitespace-nowrap"
+                      >
+                        {EFFORT_LABELS[level]}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
+
+            {/* Sliding-window indicator */}
             {contextWindowTrimmed && (
               <span
                 className="text-xs text-amber-600 dark:text-amber-400"

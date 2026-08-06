@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { DEFAULT_MODEL_ID, type ChatModelId, type ImageProviderModel, type ProviderModel, type SpeechProviderModel, type TranscriptionProviderModel } from "@/lib/models";
+import { LOCAL_MODEL_ID, type ChatModelId, type ImageProviderModel, type ProviderModel, type SpeechProviderModel, type TranscriptionProviderModel } from "@/lib/models";
 import { fetchAllProviderModels, fetchOpenRouterImageModels, fetchOpenRouterSpeechModels, fetchOpenRouterTranscriptionModels } from "@/lib/provider-models";
 import type { GuardrailsConfig } from "@/lib/guardrails/types";
 import { DEFAULT_GUARDRAILS_CONFIG } from "@/lib/guardrails/types";
@@ -9,6 +9,7 @@ import { setLoggingEnabled } from "@/lib/logger";
 import { storeApiKey } from "@/lib/keychain";
 import { isTauri } from "@tauri-apps/api/core";
 import type { HueId } from "@/lib/hue-presets";
+import type { EffortLevel } from "@/lib/reasoning";
 
 export type Theme = "system" | "light" | "dark";
 export type UserMode = "normal" | "advanced";
@@ -47,6 +48,9 @@ interface SettingsState {
   modelFetchError: string | null;
   // When true, hide OpenRouter models without a zero-data-retention endpoint.
   modelDiscoveryNoDataCollection: boolean;
+  // Reasoning effort per model id. Only reasoning-capable models get an entry;
+  // every read is clamped to what the model supports, so stale values are safe.
+  modelEffort: Record<string, EffortLevel>;
 
   // Image generation (OpenRouter). Empty imageModel = feature disabled.
   imageModel: string;
@@ -90,6 +94,7 @@ interface SettingsState {
   setApiKey: (provider: "anthropic" | "openai" | "google" | "openrouter", key: string) => void;
   setLocalLLM: (updates: Partial<SettingsState["localLLM"]>) => void;
   setDefaultModel: (model: ChatModelId) => void;
+  setModelEffort: (modelId: string, effort: EffortLevel) => void;
   setSelectedAgentId: (agentId: string | null) => void;
   setAgentDebugLogging: (enabled: boolean) => void;
   setAllowSelfEnhancement: (enabled: boolean) => void;
@@ -150,13 +155,15 @@ export const useSettingsStore = create<SettingsState>()(
         baseUrl: "http://localhost:1234/v1",
         model: "",
       },
-      defaultModel: DEFAULT_MODEL_ID,
+      // No model until the user discovers and selects one — see getActiveModels.
+      defaultModel: "",
       selectedAgentId: null,
       availableModels: [],
       selectedModels: [],
       modelFetchStatus: "idle" as const,
       modelFetchError: null,
       modelDiscoveryNoDataCollection: false,
+      modelEffort: {},
       imageModel: "",
       availableImageModels: [],
       imageModelFetchStatus: "idle" as const,
@@ -219,6 +226,8 @@ export const useSettingsStore = create<SettingsState>()(
           localLLM: { ...state.localLLM, ...updates },
         })),
       setDefaultModel: (defaultModel) => set({ defaultModel }),
+      setModelEffort: (modelId, effort) =>
+        set((state) => ({ modelEffort: { ...state.modelEffort, [modelId]: effort } })),
       setSelectedAgentId: (selectedAgentId) => set({ selectedAgentId }),
       setAgentDebugLogging: (agentDebugLogging) => {
         set({ agentDebugLogging });
@@ -239,10 +248,15 @@ export const useSettingsStore = create<SettingsState>()(
         set((state) => {
           const removeSet = new Set(modelIds);
           const remaining = state.selectedModels.filter((m) => !removeSet.has(m.id));
-          // If the default model is being removed, reset to first remaining or seed default
+          // If the default model is being removed, reset to first remaining, or
+          // to none when the selection is now empty
           const defaultModel =
-            removeSet.has(state.defaultModel) ? (remaining[0]?.id ?? DEFAULT_MODEL_ID) : state.defaultModel;
-          return { selectedModels: remaining, defaultModel };
+            removeSet.has(state.defaultModel) ? (remaining[0]?.id ?? "") : state.defaultModel;
+          // Drop the effort preference along with the model it belonged to.
+          const modelEffort = Object.fromEntries(
+            Object.entries(state.modelEffort).filter(([id]) => !removeSet.has(id))
+          );
+          return { selectedModels: remaining, defaultModel, modelEffort };
         }),
       fetchModels: async () => {
         set({ modelFetchStatus: "fetching", modelFetchError: null });
@@ -254,11 +268,19 @@ export const useSettingsStore = create<SettingsState>()(
             allModels.push(...r.models);
             if (r.error) errors.push(`${r.provider}: ${r.error}`);
           }
-          set({
+          set((state) => ({
             availableModels: allModels,
+            // Selected models are snapshots taken when they were added, so entries
+            // chosen before reasoning metadata existed carry none. Refresh re-syncs
+            // them in place — without it the effort picker keeps falling back to
+            // pi-ai's registry for models the user selected long ago.
+            selectedModels: state.selectedModels.map((s) => {
+              const fresh = allModels.find((m) => m.id === s.id && m.provider === s.provider);
+              return fresh ? { ...s, reasoning: fresh.reasoning } : s;
+            }),
             modelFetchStatus: errors.length > 0 && allModels.length === 0 ? "error" : "done",
             modelFetchError: errors.length > 0 ? errors.join("; ") : null,
-          });
+          }));
         } catch (e) {
           set({ modelFetchStatus: "error", modelFetchError: String(e) });
         }
@@ -389,14 +411,27 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: "verbalis-settings",
-      version: 1,
+      version: 2,
       // v0 → v1: allowSelfEnhancement's default flipped to true. The old
       // default (false) was persisted on every save whether or not the user
       // ever touched the toggle, so a stored false can't be read as a choice —
       // flip it once; opting out again survives (v1 states are never migrated).
+      //
+      // v1 → v2: defaultModel used to be seeded with DEFAULT_MODEL_ID and
+      // getActiveModels fell back to the MODEL_OPTIONS catalog, so a stored
+      // default that isn't in selectedModels was never actually chosen. Clear
+      // it rather than leave a model id that no longer resolves to anything.
       migrate: (persistedState, version) => {
-        if (version === 0 && persistedState && typeof persistedState === "object") {
-          (persistedState as { allowSelfEnhancement?: boolean }).allowSelfEnhancement = true;
+        if (!persistedState || typeof persistedState !== "object") return persistedState;
+        const state = persistedState as {
+          allowSelfEnhancement?: boolean;
+          defaultModel?: string;
+          selectedModels?: ProviderModel[];
+        };
+        if (version === 0) state.allowSelfEnhancement = true;
+        if (version < 2 && state.defaultModel !== LOCAL_MODEL_ID) {
+          const selected = state.selectedModels ?? [];
+          if (!selected.some((m) => m.id === state.defaultModel)) state.defaultModel = "";
         }
         return persistedState;
       },
@@ -414,6 +449,7 @@ export const useSettingsStore = create<SettingsState>()(
         availableModels: state.availableModels,
         selectedModels: state.selectedModels,
         modelDiscoveryNoDataCollection: state.modelDiscoveryNoDataCollection,
+        modelEffort: state.modelEffort,
         imageModel: state.imageModel,
         availableImageModels: state.availableImageModels,
         transcriptionModel: state.transcriptionModel,

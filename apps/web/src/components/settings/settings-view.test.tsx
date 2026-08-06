@@ -131,6 +131,7 @@ describe("SettingsView", () => {
     mockSettingsStore.localLLM = { enabled: false, provider: "lmstudio", baseUrl: "", model: "" };
     mockSettingsStore.hue = "neutral";
     mockSettingsStore.agentDebugLogging = false;
+    mockSettingsStore.defaultModel = "claude-sonnet-4-20250514";
   });
 
   // -------------------------------------------------------------------------
@@ -339,13 +340,35 @@ describe("SettingsView", () => {
       expect(screen.getByTestId("model-picker")).toBeInTheDocument();
     });
 
-    it("renders the No data collection checkbox and toggles the setting", async () => {
+    it("renders the Zero data retention checkbox and toggles the setting", async () => {
       const user = userEvent.setup();
       render(<SettingsView />);
-      const checkbox = screen.getByRole("checkbox", { name: /No data collection/i });
+      const checkbox = screen.getByRole("checkbox", { name: /Zero data retention/i });
       expect(checkbox).not.toBeChecked();
       await user.click(checkbox);
       expect(mockSettingsStore.setModelDiscoveryNoDataCollection).toHaveBeenCalledWith(true);
+    });
+
+    it("selects the stored default model when it is still available", () => {
+      render(<SettingsView />);
+      const select = screen.getByRole("combobox") as HTMLSelectElement;
+      expect(select.value).toBe("claude-sonnet-4-20250514");
+    });
+
+    it("falls back to None (disabled) when the stored default model is gone", () => {
+      mockSettingsStore.defaultModel = "model-that-was-removed";
+      render(<SettingsView />);
+      const select = screen.getByRole("combobox") as HTMLSelectElement;
+      expect(select.value).toBe("");
+      const none = screen.getByRole("option", { name: "None (disabled)" }) as HTMLOptionElement;
+      expect(none.selected).toBe(true);
+    });
+
+    it("clears the default model when None (disabled) is selected", async () => {
+      const user = userEvent.setup();
+      render(<SettingsView />);
+      await user.selectOptions(screen.getByRole("combobox"), "");
+      expect(mockSetDefaultModel).toHaveBeenCalledWith("");
     });
 
     it("renders Text Model Discovery before Default Text Model", () => {

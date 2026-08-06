@@ -43,6 +43,10 @@ vi.mock("shiki", () => ({
   bundledLanguages: { yaml: {}, markdown: {}, text: {} },
 }));
 
+vi.mock("@shikijs/engine-javascript", () => ({
+  createJavaScriptRegexEngine: vi.fn(() => ({})),
+}));
+
 vi.mock("lucide-react", () =>
   new Proxy(
     {},

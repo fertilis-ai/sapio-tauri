@@ -6,6 +6,7 @@ import { ToolboxTabs } from "./toolbox-tabs";
 import { highlightCode, escapeHtml } from "@/lib/highlighter";
 import { runWorkflowByName } from "@/lib/workflows/run-workflow";
 import { validateToolboxContent } from "@/lib/toolbox/toolbox-schemas";
+import { cn } from "@/lib/utils";
 
 // Map category to language for syntax highlighting
 function getLanguage(category: ToolboxCategory): string {
@@ -50,10 +51,20 @@ export function ToolboxEditor() {
     let cancelled = false;
     const lang = getLanguage(activeItem.category);
 
-    highlightCode(activeItem.currentContent, lang).then((html) => {
-      if (cancelled) return;
-      setHighlightedHtml(html ?? `<pre><code>${escapeHtml(activeItem.currentContent)}</code></pre>`);
-    });
+    const plain = `<pre><code>${escapeHtml(activeItem.currentContent)}</code></pre>`;
+
+    highlightCode(activeItem.currentContent, lang)
+      .then((html) => {
+        if (cancelled) return;
+        setHighlightedHtml(html ?? plain);
+      })
+      .catch((error: unknown) => {
+        // The overlay is the only visible text layer, so a swallowed failure
+        // would leave the editor showing nothing but line numbers.
+        console.warn("[toolbox-editor] Syntax highlighting failed:", error);
+        if (cancelled) return;
+        setHighlightedHtml(plain);
+      });
 
     return () => {
       cancelled = true;
@@ -163,7 +174,7 @@ export function ToolboxEditor() {
             style={{ minWidth: `${String(lineCount).length + 2}ch` }}
           >
             {lineNumbers.map((num) => (
-              <div key={num} className="leading-6">
+              <div key={num} className="leading-5">
                 {num}
               </div>
             ))}
@@ -210,7 +221,15 @@ export function ToolboxEditor() {
                 }
               }}
               wrap="off"
-              className="relative z-10 h-full w-full resize-none bg-transparent p-4 focus:outline-none leading-5 caret-foreground text-transparent selection:bg-primary/30 font-mono text-sm overflow-x-auto"
+              className={cn(
+                // `leading-5` must stay after `text-sm`: tailwind-merge drops a
+                // preceding `leading-*` because text-size utilities also set
+                // line-height, and the overlay depends on the two matching.
+                "relative z-10 h-full w-full resize-none bg-transparent p-4 focus:outline-none caret-foreground selection:bg-primary/30 font-mono text-sm leading-5 overflow-x-auto",
+                // Only hide the textarea's own text once the overlay actually
+                // has something to show in its place.
+                highlightedHtml ? "text-transparent" : "text-foreground",
+              )}
               spellCheck={false}
               autoCapitalize="off"
               autoCorrect="off"

@@ -1,9 +1,27 @@
+/**
+ * OpenRouter's per-model reasoning capability, copied verbatim from the
+ * `reasoning` object in `GET /api/v1/models`. Stored raw rather than
+ * pre-normalised so the mapping in `lib/reasoning.ts` can be corrected without
+ * making everyone re-run model discovery.
+ */
+export interface OpenRouterReasoning {
+  /** Reasoning cannot be turned off for this model. */
+  mandatory?: boolean;
+  default_enabled?: boolean;
+  supports_max_tokens?: boolean;
+  /** Effort names the model accepts, e.g. ["max","high","low"]. Absent = no discrete levels. */
+  supported_efforts?: string[];
+  default_effort?: string;
+}
+
 export interface ProviderModel {
   id: string;
   name: string;
   provider: string;
   /** True when at least one OpenRouter endpoint for this model is zero-data-retention. */
   zdr?: boolean;
+  /** OpenRouter reasoning capability; absent for other providers and for pre-existing entries. */
+  reasoning?: OpenRouterReasoning;
 }
 
 /** An OpenRouter image-generation model (from /api/v1/images/models). */
@@ -28,22 +46,9 @@ export interface SpeechProviderModel {
   voices: string[];
 }
 
-export const MODEL_OPTIONS: ProviderModel[] = [
-  { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", provider: "anthropic" },
-  { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", provider: "anthropic" },
-  { id: "gpt-4o", name: "GPT-4o", provider: "openai" },
-  { id: "gpt-4o-mini", name: "GPT-4o Mini", provider: "openai" },
-  { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", provider: "google" },
-  { id: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4", provider: "openrouter" },
-  { id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "openrouter" },
-  { id: "deepseek/deepseek-r1", name: "DeepSeek R1", provider: "openrouter" },
-  { id: "meta-llama/llama-4-maverick", name: "Llama 4 Maverick", provider: "openrouter" },
-];
-
 export type ModelId = string;
 export type ModelProvider = string;
 
-export const DEFAULT_MODEL_ID: ModelId = MODEL_OPTIONS[0].id;
 export const LOCAL_MODEL_ID = "local" as const;
 export type ChatModelId = string;
 
@@ -61,10 +66,11 @@ export const PROVIDER_BASE_URL_MAP: Record<string, string> = {
 };
 
 /**
- * Returns the active model list from the given selectedModels array,
- * falling back to MODEL_OPTIONS if empty.
+ * Returns the user's selected models. An empty selection means exactly that —
+ * no models. This deliberately has no built-in fallback catalog: seeding one
+ * made the settings and chat pickers list models the user never chose, which
+ * reads as configured when nothing is. Models come from discovery only.
  */
 export function getActiveModels(selectedModels?: ProviderModel[]): ProviderModel[] {
-  if (selectedModels && selectedModels.length > 0) return selectedModels;
-  return MODEL_OPTIONS;
+  return selectedModels ?? [];
 }

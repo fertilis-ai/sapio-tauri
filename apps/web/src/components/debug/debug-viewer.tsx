@@ -3,7 +3,7 @@ import { Bug, Trash2, RefreshCw } from "lucide-react";
 import { useDebugStore } from "@/stores/debug-store";
 
 export function DebugViewer() {
-  const { selectedFile, fileContent, isLoading, refreshContent, clearSelectedFile } =
+  const { selectedFile, fileContent, isLoading, error, refreshContent, clearSelectedFile } =
     useDebugStore();
 
   // Auto-refresh every 3 seconds when a file is selected
@@ -49,6 +49,8 @@ export function DebugViewer() {
       <div className="flex-1 overflow-auto p-3">
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading...</p>
+        ) : error ? (
+          <p className="text-sm text-destructive">Failed to read log file: {error}</p>
         ) : fileContent ? (
           <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
             {fileContent}

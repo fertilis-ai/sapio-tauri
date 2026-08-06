@@ -17,11 +17,14 @@ vi.mock("@/stores/chat-store", () => ({
   useChatStore: () => mockChatStore,
 }));
 
+const mockSetModelEffort = vi.fn();
 const mockSettingsStore = {
   localLLM: { enabled: false, provider: "lmstudio", baseUrl: "", model: "" },
   selectedModels: [],
   transcriptionModel: "",
   apiKeys: { anthropic: "", openai: "", google: "", openrouter: "" },
+  modelEffort: {} as Record<string, string>,
+  setModelEffort: mockSetModelEffort,
 };
 
 vi.mock("@/stores/settings-store", () => ({
@@ -38,10 +41,34 @@ vi.mock("@/lib/hooks/use-voice-transcription", () => ({
   useVoiceTranscription: () => mockVoiceTranscription,
 }));
 
+// `reasoning` objects are verbatim from OpenRouter's GET /api/v1/models.
 vi.mock("@/lib/models", () => ({
   getActiveModels: () => [
     { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", provider: "anthropic" },
     { id: "gpt-4o", name: "GPT-4o", provider: "openai" },
+    {
+      id: "x-ai/grok-4.5",
+      name: "Grok 4.5",
+      provider: "openrouter",
+      reasoning: {
+        mandatory: true,
+        default_enabled: true,
+        supported_efforts: ["high", "medium", "low"],
+        default_effort: "high",
+      },
+    },
+    {
+      id: "minimax/minimax-m3",
+      name: "MiniMax M3",
+      provider: "openrouter",
+      reasoning: { mandatory: false },
+    },
+    {
+      id: "z-ai/glm-5.2",
+      name: "GLM 5.2",
+      provider: "openrouter",
+      reasoning: { mandatory: false, supported_efforts: ["minimal", "low", "medium", "high"] },
+    },
   ],
 }));
 
@@ -65,7 +92,24 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenuTrigger: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="dropdown-trigger">{children}</div>
   ),
-  DropdownMenuRadioGroup: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  // Radio selection is delegated: clicking an item bubbles to the group, which
+  // reads the item's data-value. Keeps the stand-ins plain DOM (no context).
+  DropdownMenuRadioGroup: ({
+    children,
+    onValueChange,
+  }: {
+    children: React.ReactNode;
+    onValueChange?: (value: string) => void;
+  }) => (
+    <div
+      onClick={(e: React.MouseEvent) => {
+        const item = (e.target as HTMLElement).closest("[data-value]");
+        if (item) onValueChange?.(item.getAttribute("data-value") ?? "");
+      }}
+    >
+      {children}
+    </div>
+  ),
   DropdownMenuRadioItem: ({
     children,
     value,
@@ -73,7 +117,9 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
     children: React.ReactNode;
     value: string;
   }) => (
-    <div data-testid={`radio-item-${value}`}>{children}</div>
+    <div data-testid={`radio-item-${value}`} data-value={value}>
+      {children}
+    </div>
   ),
   DropdownMenuSeparator: () => <hr />,
 }));
@@ -120,8 +166,18 @@ describe("ChatInput", () => {
     mockChatStore.model = "claude-sonnet-4-20250514";
     mockSettingsStore.transcriptionModel = "";
     mockSettingsStore.apiKeys = { anthropic: "", openai: "", google: "", openrouter: "" };
+    mockSettingsStore.modelEffort = {};
     mockVoiceTranscription.status = "idle";
   });
+
+  /** The model picker is always the first dropdown in the toolbar. */
+  const modelTrigger = () => screen.getAllByTestId("dropdown-trigger")[0];
+  /**
+   * The effort picker is the second, and only rendered when the model supports
+   * reasoning — it has no icon of its own, so position is the handle.
+   */
+  const effortTrigger = () => screen.getAllByTestId("dropdown-trigger")[1];
+  const hasEffortPicker = () => screen.getAllByTestId("dropdown-trigger").length > 1;
 
   // -------------------------------------------------------------------------
   // Rendering
@@ -145,8 +201,7 @@ describe("ChatInput", () => {
 
   it("renders model label in the dropdown trigger", () => {
     render(<ChatInput {...defaultProps} />);
-    const trigger = screen.getByTestId("dropdown-trigger");
-    expect(trigger).toHaveTextContent("Claude Sonnet 4");
+    expect(modelTrigger()).toHaveTextContent("Claude Sonnet 4");
   });
 
   it("renders the plus button for adding files", () => {
@@ -367,7 +422,90 @@ describe("ChatInput", () => {
   it("shows local LLM disabled label when model is local", () => {
     mockChatStore.model = "local";
     render(<ChatInput {...defaultProps} />);
-    const trigger = screen.getByTestId("dropdown-trigger");
-    expect(trigger).toHaveTextContent("Local LLM (disabled)");
+    expect(modelTrigger()).toHaveTextContent("Local LLM (disabled)");
+  });
+
+  // -------------------------------------------------------------------------
+  // Reasoning effort picker
+  // -------------------------------------------------------------------------
+  //
+  // lib/reasoning is not mocked. OpenRouter's per-model metadata is the only
+  // source of levels — pi-ai's registry is never consulted, so an entry without
+  // a `reasoning` object gets no picker regardless of what the registry knows.
+
+  it("shows the effort picker for a model OpenRouter says can reason", () => {
+    mockChatStore.model = "z-ai/glm-5.2";
+    render(<ChatInput {...defaultProps} />);
+    expect(hasEffortPicker()).toBe(true);
+  });
+
+  it("defaults the effort label to Medium when nothing is stored", () => {
+    mockChatStore.model = "z-ai/glm-5.2";
+    render(<ChatInput {...defaultProps} />);
+    expect(effortTrigger()).toHaveTextContent("Medium");
+  });
+
+  it("shows the stored effort for the selected model", () => {
+    mockChatStore.model = "z-ai/glm-5.2";
+    mockSettingsStore.modelEffort = { "z-ai/glm-5.2": "low" };
+    render(<ChatInput {...defaultProps} />);
+    expect(effortTrigger()).toHaveTextContent("Low");
+  });
+
+  it("offers only the levels the model supports", () => {
+    mockChatStore.model = "z-ai/glm-5.2";
+    render(<ChatInput {...defaultProps} />);
+    for (const level of ["off", "minimal", "low", "medium", "high"]) {
+      expect(screen.getByTestId(`radio-item-${level}`)).toBeInTheDocument();
+    }
+    // Not listed in supported_efforts, so not offered.
+    expect(screen.queryByTestId("radio-item-xhigh")).not.toBeInTheDocument();
+  });
+
+  it("hides the effort picker for a model with no OpenRouter metadata", () => {
+    // claude-sonnet-4 is a reasoning model in pi-ai's registry; that no longer
+    // counts. It gets a picker once discovery records metadata for it, not before.
+    mockChatStore.model = "claude-sonnet-4-20250514";
+    render(<ChatInput {...defaultProps} />);
+    expect(hasEffortPicker()).toBe(false);
+  });
+
+  it("offers OpenRouter's level set for an OpenRouter model", () => {
+    mockChatStore.model = "x-ai/grok-4.5";
+    render(<ChatInput {...defaultProps} />);
+    for (const level of ["low", "medium", "high"]) {
+      expect(screen.getByTestId(`radio-item-${level}`)).toBeInTheDocument();
+    }
+    // mandatory: reasoning cannot be turned off, so "Off" must not be offered.
+    expect(screen.queryByTestId("radio-item-off")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("radio-item-minimal")).not.toBeInTheDocument();
+    // default_effort wins over the app-wide "medium".
+    expect(effortTrigger()).toHaveTextContent("High");
+  });
+
+  it("hides the effort picker when OpenRouter lists no discrete levels", () => {
+    mockChatStore.model = "minimax/minimax-m3";
+    render(<ChatInput {...defaultProps} />);
+    expect(hasEffortPicker()).toBe(false);
+  });
+
+  it("hides the effort picker for a non-reasoning model", () => {
+    mockChatStore.model = "gpt-4o";
+    render(<ChatInput {...defaultProps} />);
+    expect(hasEffortPicker()).toBe(false);
+  });
+
+  it("hides the effort picker for the local model", () => {
+    mockChatStore.model = "local";
+    render(<ChatInput {...defaultProps} />);
+    expect(hasEffortPicker()).toBe(false);
+  });
+
+  it("stores the chosen level against the selected model id", async () => {
+    const user = userEvent.setup();
+    mockChatStore.model = "z-ai/glm-5.2";
+    render(<ChatInput {...defaultProps} />);
+    await user.click(screen.getByTestId("radio-item-high"));
+    expect(mockSetModelEffort).toHaveBeenCalledWith("z-ai/glm-5.2", "high");
   });
 });

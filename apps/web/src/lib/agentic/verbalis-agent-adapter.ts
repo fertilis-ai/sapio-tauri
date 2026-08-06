@@ -24,6 +24,7 @@ import type {
   Message as PiMessage,
   Model,
   Api,
+  ThinkingLevel,
   Tool,
   ToolCall,
 } from "@earendil-works/pi-ai";
@@ -71,6 +72,8 @@ export interface VerbalisAdapterConfig {
   apiKey: string;
   /** Temperature for LLM calls */
   temperature?: number;
+  /** Reasoning effort for LLM calls. Undefined = thinking off / provider default. */
+  reasoning?: ThinkingLevel;
   /** Whether this is a local model */
   isLocal?: boolean;
   /** Guardrails configuration */
@@ -378,6 +381,7 @@ export class VerbalisAgentAdapter {
       model: config.model,
       apiKey: config.apiKey,
       temperature: config.temperature ?? 0.7,
+      reasoning: config.reasoning,
       convertToLlm: (agentMessages: AgentMessage[]): PiMessage[] => {
         // Convert AgentMessage[] to PiMessage[] for the LLM
         // AgentMessage is a union of PiMessage | CustomMessages, so we filter to valid LLM messages

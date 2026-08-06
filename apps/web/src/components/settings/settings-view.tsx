@@ -366,6 +366,9 @@ function ModelsSection() {
     })),
     { value: LOCAL_MODEL_ID, label: localOptionLabel },
   ];
+  // A stale default (e.g. the model was removed from discovery) is not a real
+  // selection — show "None (disabled)" instead of silently showing option one.
+  const hasDefaultModel = options.some((option) => option.value === defaultModel);
 
   const canFetch = isTauri();
   const isFetching = modelFetchStatus === "fetching";
@@ -407,9 +410,9 @@ function ModelsSection() {
               className="h-4 w-4 rounded border-input"
             />
             <div>
-              <span className="text-sm">No data collection</span>
+              <span className="text-sm">Zero data retention</span>
               <p className="text-xs text-muted-foreground">
-                Only show OpenRouter models served by zero-data-retention endpoints.
+                Only show OpenRouter models served by endpoints that don't retain your data.
               </p>
             </div>
           </label>
@@ -422,10 +425,11 @@ function ModelsSection() {
           <label className="text-sm font-medium">Default Text Model</label>
           <div className="mt-2">
             <select
-              value={defaultModel}
+              value={hasDefaultModel ? defaultModel : ""}
               onChange={(e) => setDefaultModel(e.target.value as ChatModelId)}
               className="w-full rounded-md border border-input bg-transparent dark:bg-input/30 h-8 px-2.5 py-1 text-sm text-foreground"
             >
+              <option value="">None (disabled)</option>
               {options.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -470,7 +474,7 @@ function ModelsSection() {
                 <option value="">None (disabled)</option>
                 {availableImageModels.map((model) => (
                   <option key={model.id} value={model.id}>
-                    {model.name}{model.supportsImageInput ? " · supports editing" : ""}
+                    {model.name}
                   </option>
                 ))}
               </select>

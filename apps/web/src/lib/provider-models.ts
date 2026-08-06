@@ -1,6 +1,7 @@
 import { appFetch } from "@/lib/http";
 import type {
   ImageProviderModel,
+  OpenRouterReasoning,
   ProviderModel,
   SpeechProviderModel,
   TranscriptionProviderModel,
@@ -146,6 +147,7 @@ async function fetchOpenRouter(apiKey?: string): Promise<FetchModelsResult> {
         id: string;
         name?: string;
         architecture?: { input_modalities?: string[]; output_modalities?: string[] };
+        reasoning?: OpenRouterReasoning;
       }>;
     };
     const models: ProviderModel[] = (data.data ?? [])
@@ -155,6 +157,7 @@ async function fetchOpenRouter(apiKey?: string): Promise<FetchModelsResult> {
         name: m.name ?? m.id,
         provider: "openrouter",
         ...(zdrIds.has(m.id) ? { zdr: true } : {}),
+        ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       }));
     return { provider: "openrouter", models };
   } catch (e) {

@@ -1,14 +1,26 @@
 import { createHighlighter, type Highlighter, bundledLanguages } from "shiki";
+import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import { CODE_HIGHLIGHT_THEMES } from "@/lib/code-theme";
 
 let highlighterPromise: Promise<Highlighter> | null = null;
 
 function getHighlighter(): Promise<Highlighter> {
   if (!highlighterPromise) {
-    highlighterPromise = createHighlighter({
+    // The JavaScript regex engine, not Oniguruma. The packaged Tauri app runs
+    // under `script-src 'self'` with no 'wasm-unsafe-eval', which blocks the
+    // WASM engine shiki would otherwise pull in. `forgiving` makes the engine
+    // skip patterns it can't translate instead of throwing.
+    const promise = createHighlighter({
       themes: CODE_HIGHLIGHT_THEMES.list,
       langs: [],
+      engine: createJavaScriptRegexEngine({ forgiving: true }),
     });
+    // Never cache a rejection — otherwise one failure blanks every editor for
+    // the rest of the session.
+    promise.catch(() => {
+      if (highlighterPromise === promise) highlighterPromise = null;
+    });
+    highlighterPromise = promise;
   }
   return highlighterPromise;
 }
@@ -29,9 +41,14 @@ async function ensureLanguage(h: Highlighter, lang: string): Promise<void> {
     return;
   }
 
-  const promise = h.loadLanguage(lang as keyof typeof bundledLanguages).then(() => {
-    loadingLanguages.delete(lang);
-  });
+  const promise = h
+    .loadLanguage(lang as keyof typeof bundledLanguages)
+    .then(() => undefined)
+    // Clear on failure too, so a transient grammar error doesn't poison the
+    // language for the rest of the session.
+    .finally(() => {
+      loadingLanguages.delete(lang);
+    });
   loadingLanguages.set(lang, promise);
   await promise;
 }

@@ -54,7 +54,6 @@ vi.mock("@/lib/guardrails/presets", async () => {
 import { useSettingsStore } from "./settings-store";
 import { DEFAULT_GUARDRAILS_CONFIG } from "@/lib/guardrails/types";
 import { YOLO_MODE_CONFIG, ADVANCED_MODE_CONFIG, NORMAL_MODE_CONFIG } from "@/lib/guardrails/presets";
-import { DEFAULT_MODEL_ID } from "@/lib/models";
 
 function resetStore() {
   // Use partial setState (no replace flag) to preserve action functions
@@ -70,11 +69,12 @@ function resetStore() {
     guardrails: true,
     apiKeys: { anthropic: "", openai: "", google: "", openrouter: "" },
     localLLM: { enabled: false, provider: "lmstudio", baseUrl: "http://localhost:1234/v1", model: "" },
-    defaultModel: DEFAULT_MODEL_ID,
+    defaultModel: "",
     availableModels: [],
     selectedModels: [],
     modelFetchStatus: "idle" as const,
     modelFetchError: null,
+    modelEffort: {},
     imageModel: "",
     availableImageModels: [],
     imageModelFetchStatus: "idle" as const,
@@ -112,6 +112,10 @@ describe("settings-store", () => {
       expect(apiKeys.openrouter).toBe("");
     });
 
+    it("has no default model until one is selected", () => {
+      expect(useSettingsStore.getState().defaultModel).toBe("");
+    });
+
     it("has guardrails enabled", () => {
       expect(useSettingsStore.getState().guardrails).toBe(true);
     });
@@ -141,11 +145,23 @@ describe("settings-store", () => {
     });
   });
 
+  describe("partialize", () => {
+    type Partialize = (state: unknown) => Record<string, unknown>;
+
+    // partialize is an explicit allowlist — a field missing from it silently
+    // fails to survive a restart.
+    it("persists the per-model reasoning effort", () => {
+      const partialize = persistCapture.options?.partialize as Partialize;
+      useSettingsStore.getState().setModelEffort("m1", "high");
+      expect(partialize(useSettingsStore.getState()).modelEffort).toEqual({ m1: "high" });
+    });
+  });
+
   describe("persist migration", () => {
     type Migrate = (state: unknown, version: number) => unknown;
 
     it("is versioned", () => {
-      expect(persistCapture.options?.version).toBe(1);
+      expect(persistCapture.options?.version).toBe(2);
     });
 
     it("v0 → v1 flips allowSelfEnhancement to true (old default was persisted, not chosen)", () => {
@@ -158,10 +174,49 @@ describe("settings-store", () => {
       expect(migrated.theme).toBe("dark");
     });
 
-    it("leaves v1 states untouched (a later opt-out survives)", () => {
+    it("leaves a v1 opt-out of allowSelfEnhancement untouched", () => {
       const migrate = persistCapture.options?.migrate as Migrate;
       const migrated = migrate({ allowSelfEnhancement: false }, 1) as Record<string, unknown>;
       expect(migrated.allowSelfEnhancement).toBe(false);
+    });
+
+    it("v1 → v2 clears a defaultModel that is not in selectedModels", () => {
+      const migrate = persistCapture.options?.migrate as Migrate;
+      const migrated = migrate(
+        { defaultModel: "claude-sonnet-4-20250514", selectedModels: [] },
+        1
+      ) as Record<string, unknown>;
+      expect(migrated.defaultModel).toBe("");
+    });
+
+    it("v1 → v2 keeps a defaultModel the user actually selected", () => {
+      const migrate = persistCapture.options?.migrate as Migrate;
+      const migrated = migrate(
+        {
+          defaultModel: "m1",
+          selectedModels: [{ id: "m1", name: "Model 1", provider: "anthropic" }],
+        },
+        1
+      ) as Record<string, unknown>;
+      expect(migrated.defaultModel).toBe("m1");
+    });
+
+    it("v1 → v2 keeps the local model as a default", () => {
+      const migrate = persistCapture.options?.migrate as Migrate;
+      const migrated = migrate({ defaultModel: "local", selectedModels: [] }, 1) as Record<
+        string,
+        unknown
+      >;
+      expect(migrated.defaultModel).toBe("local");
+    });
+
+    it("leaves v2 states untouched", () => {
+      const migrate = persistCapture.options?.migrate as Migrate;
+      const migrated = migrate({ defaultModel: "gone", selectedModels: [] }, 2) as Record<
+        string,
+        unknown
+      >;
+      expect(migrated.defaultModel).toBe("gone");
     });
   });
 
@@ -342,11 +397,42 @@ describe("settings-store", () => {
       expect(useSettingsStore.getState().defaultModel).toBe("m2");
     });
 
-    it("removeSelectedModels falls back to DEFAULT_MODEL_ID when all removed", () => {
+    it("removeSelectedModels clears defaultModel when all removed", () => {
       const models = [{ id: "m1", name: "Model 1", provider: "anthropic" }];
       useSettingsStore.setState({ selectedModels: models, defaultModel: "m1" });
       useSettingsStore.getState().removeSelectedModels(["m1"]);
-      expect(useSettingsStore.getState().defaultModel).toBe(DEFAULT_MODEL_ID);
+      expect(useSettingsStore.getState().defaultModel).toBe("");
+    });
+
+    it("removeSelectedModels drops the effort preference of removed models", () => {
+      const models = [
+        { id: "m1", name: "Model 1", provider: "anthropic" },
+        { id: "m2", name: "Model 2", provider: "openai" },
+      ];
+      useSettingsStore.setState({
+        selectedModels: models,
+        modelEffort: { m1: "high", m2: "low" },
+      });
+      useSettingsStore.getState().removeSelectedModels(["m1"]);
+      expect(useSettingsStore.getState().modelEffort).toEqual({ m2: "low" });
+    });
+  });
+
+  describe("modelEffort", () => {
+    it("defaults to an empty map", () => {
+      expect(useSettingsStore.getState().modelEffort).toEqual({});
+    });
+
+    it("setModelEffort stores a level per model id", () => {
+      useSettingsStore.getState().setModelEffort("m1", "high");
+      useSettingsStore.getState().setModelEffort("m2", "low");
+      expect(useSettingsStore.getState().modelEffort).toEqual({ m1: "high", m2: "low" });
+    });
+
+    it("setModelEffort overwrites the level for the same model", () => {
+      useSettingsStore.getState().setModelEffort("m1", "high");
+      useSettingsStore.getState().setModelEffort("m1", "minimal");
+      expect(useSettingsStore.getState().modelEffort).toEqual({ m1: "minimal" });
     });
   });
 
@@ -381,6 +467,40 @@ describe("settings-store", () => {
       await useSettingsStore.getState().fetchModels();
       expect(useSettingsStore.getState().modelFetchStatus).toBe("done");
       expect(useSettingsStore.getState().modelFetchError).toContain("rate limited");
+    });
+
+    it("backfills reasoning metadata onto already-selected models", async () => {
+      // Selections are snapshots: entries chosen before discovery recorded
+      // `reasoning` carry none, and Refresh is the only thing that re-syncs them.
+      const reasoning = { mandatory: true, supported_efforts: ["high", "low"] };
+      useSettingsStore.setState({
+        selectedModels: [
+          { id: "x-ai/grok-4.5", name: "Grok 4.5", provider: "openrouter" },
+          { id: "gone/model", name: "Gone", provider: "openrouter", zdr: true },
+        ],
+      });
+      mockFetchAllProviderModels.mockResolvedValue([
+        {
+          provider: "openrouter",
+          models: [{ id: "x-ai/grok-4.5", name: "Grok 4.5", provider: "openrouter", reasoning }],
+        },
+      ]);
+
+      await useSettingsStore.getState().fetchModels();
+      const selected = useSettingsStore.getState().selectedModels;
+      expect(selected[0]).toEqual({
+        id: "x-ai/grok-4.5",
+        name: "Grok 4.5",
+        provider: "openrouter",
+        reasoning,
+      });
+      // A model no longer offered keeps its entry untouched rather than vanishing.
+      expect(selected[1]).toEqual({
+        id: "gone/model",
+        name: "Gone",
+        provider: "openrouter",
+        zdr: true,
+      });
     });
 
     it("sets error status when all providers fail with no models", async () => {

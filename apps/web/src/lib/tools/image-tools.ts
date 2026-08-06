@@ -114,7 +114,7 @@ export async function executeGenerateImage(
     if (known && !known.supportsImageInput) {
       throw new Error(
         `The selected image model "${imageModel}" does not support image editing. ` +
-          `Choose a model marked "supports editing" in Settings → Models.`
+          `Choose a different Image Model in Settings → Models.`
       );
     }
     inputReferences = [await buildInputReference(source_image)];

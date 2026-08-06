@@ -3,6 +3,7 @@ import { ChevronRight, ChevronDown, ChevronsRight, ChevronsLeft, ChevronRightIco
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useSettingsStore } from "@/stores/settings-store";
+import { cn } from "@/lib/utils";
 import type { ProviderModel } from "@/lib/models";
 
 const providerDisplayName: Record<string, string> = {
@@ -11,6 +12,23 @@ const providerDisplayName: Record<string, string> = {
   google: "Google",
   openrouter: "OpenRouter",
 };
+
+/**
+ * Only OpenRouter models carry `zdr`, and a failed ZDR fetch degrades to "untagged"
+ * (provider-models.ts fetchZdrModelIds) — so absence means unknown, not "retains data".
+ * Badge the confirmed positive only; never imply the negative.
+ */
+function ZdrBadge({ model, className }: { model: ProviderModel; className?: string }) {
+  if (!model.zdr) return null;
+  return (
+    <span
+      className={cn("shrink-0 text-[10px] font-medium text-green-600 dark:text-green-400", className)}
+      title="Zero data retention — served by endpoints that don't store your prompts"
+    >
+      ZDR
+    </span>
+  );
+}
 
 /** Group models by provider */
 function groupByProvider(models: ProviderModel[]): Record<string, ProviderModel[]> {
@@ -175,14 +193,15 @@ export function ModelPicker() {
                         key={m.id}
                         type="button"
                         onClick={(e) => toggleLeftItem(m.id, e)}
-                        className={`w-full truncate rounded px-4 py-0.5 text-left text-xs ${
+                        className={`flex w-full items-center gap-2 truncate rounded px-4 py-0.5 text-left text-xs ${
                           leftSelected.has(m.id)
                             ? "bg-primary/10 text-primary"
                             : "hover:bg-muted"
                         }`}
                         title={m.id}
                       >
-                        {m.name !== m.id ? m.name : m.id}
+                        <span className="truncate">{m.name !== m.id ? m.name : m.id}</span>
+                        <ZdrBadge model={m} className="ml-auto" />
                       </button>
                     ))}
                 </div>
@@ -263,7 +282,10 @@ export function ModelPicker() {
                 title={m.id}
               >
                 <span className="truncate">{m.name !== m.id ? m.name : m.id}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground">{providerDisplayName[m.provider] ?? m.provider}</span>
+                <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <ZdrBadge model={m} />
+                  <span className="text-[10px] text-muted-foreground">{providerDisplayName[m.provider] ?? m.provider}</span>
+                </span>
               </button>
             ))}
           </div>

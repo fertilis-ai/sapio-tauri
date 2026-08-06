@@ -216,7 +216,7 @@ describe("ModelPicker", () => {
       expect(screen.queryByText("GPT-4o")).not.toBeInTheDocument();
     });
 
-    it("hides non-ZDR OpenRouter models when No data collection is enabled", () => {
+    it("hides non-ZDR OpenRouter models when Zero data retention is enabled", () => {
       mockSettingsStore.modelDiscoveryNoDataCollection = true;
       mockSettingsStore.availableModels = [
         { id: "anthropic/claude-3", name: "Claude 3 (OR)", provider: "openrouter", zdr: true },
@@ -229,7 +229,7 @@ describe("ModelPicker", () => {
       expect(screen.getByText("GPT-4o")).toBeInTheDocument();
     });
 
-    it("shows all models when No data collection is disabled", () => {
+    it("shows all models when Zero data retention is disabled", () => {
       mockSettingsStore.modelDiscoveryNoDataCollection = false;
       mockSettingsStore.availableModels = [
         { id: "anthropic/claude-3", name: "Claude 3 (OR)", provider: "openrouter", zdr: true },
@@ -238,6 +238,28 @@ describe("ModelPicker", () => {
       render(<ModelPicker />);
       expect(screen.getByText("Claude 3 (OR)")).toBeInTheDocument();
       expect(screen.getByText("Llama 3 (OR)")).toBeInTheDocument();
+    });
+
+    it("badges ZDR models in the available panel, and only those", () => {
+      mockSettingsStore.modelDiscoveryNoDataCollection = false;
+      mockSettingsStore.availableModels = [
+        { id: "anthropic/claude-3", name: "Claude 3 (OR)", provider: "openrouter", zdr: true },
+        { id: "meta/llama-3", name: "Llama 3 (OR)", provider: "openrouter" },
+        { id: "claude-1", name: "Claude 1", provider: "anthropic" },
+      ];
+      render(<ModelPicker />);
+      // An untagged model means "unknown", never "retains data" — exactly one badge.
+      expect(screen.getAllByText("ZDR")).toHaveLength(1);
+    });
+
+    it("does not badge models that are merely untagged", () => {
+      mockSettingsStore.modelDiscoveryNoDataCollection = false;
+      mockSettingsStore.availableModels = [
+        { id: "meta/llama-3", name: "Llama 3 (OR)", provider: "openrouter" },
+        { id: "claude-1", name: "Claude 1", provider: "anthropic" },
+      ];
+      render(<ModelPicker />);
+      expect(screen.queryByText("ZDR")).not.toBeInTheDocument();
     });
   });
 
@@ -261,6 +283,16 @@ describe("ModelPicker", () => {
       ];
       render(<ModelPicker />);
       expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    });
+
+    it("badges ZDR models in the selected panel alongside the provider label", () => {
+      mockSettingsStore.selectedModels = [
+        { id: "anthropic/claude-3", name: "Claude 3 (OR)", provider: "openrouter", zdr: true },
+        { id: "meta/llama-3", name: "Llama 3 (OR)", provider: "openrouter" },
+      ];
+      render(<ModelPicker />);
+      expect(screen.getAllByText("ZDR")).toHaveLength(1);
+      expect(screen.getAllByText("OpenRouter")).toHaveLength(2);
     });
 
     it("filters selected models by search query", async () => {

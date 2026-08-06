@@ -59,6 +59,7 @@ const defaultStoreState = {
   defaultModel: "claude-sonnet-4-20250514",
   availableModels: [],
   selectedModels: [],
+  modelEffort: {} as Record<string, string>,
   imageModel: "",
   availableImageModels: [],
   guardrailsConfig: { enabled: true, sandbox: { enabled: false } },
@@ -181,6 +182,35 @@ describe("config-sync", () => {
       const parsed = YAML.parse(writtenContent);
       expect(parsed.imageModel).toBe("");
       expect(parsed.availableImageModels).toEqual([]);
+    });
+
+    // The effort picker's choice is worthless if it does not survive a restart, and
+    // config.yaml — not localStorage — is the desktop source of truth every other
+    // model setting round-trips through.
+    it("persists per-model reasoning effort when writing config", async () => {
+      mockIsTauri.mockReturnValue(true);
+      mockPathExists.mockResolvedValue(false);
+      defaultStoreState.modelEffort = { "x-ai/grok-4.5": "low" };
+
+      await initConfigSync();
+
+      const parsed = YAML.parse(mockWriteFile.mock.calls[0][1] as string);
+      expect(parsed.modelEffort).toEqual({ "x-ai/grok-4.5": "low" });
+      defaultStoreState.modelEffort = {};
+    });
+
+    it("loads per-model reasoning effort into the store", async () => {
+      mockIsTauri.mockReturnValue(true);
+      mockPathExists.mockResolvedValue(true);
+      mockReadFile.mockResolvedValue(
+        YAML.stringify({ modelEffort: { "google/gemini-3.6-flash": "high" } })
+      );
+
+      await initConfigSync();
+
+      expect(mockSetState).toHaveBeenCalledWith({
+        modelEffort: { "google/gemini-3.6-flash": "high" },
+      });
     });
 
     it("loads guardrails config and syncs legacy fields", async () => {

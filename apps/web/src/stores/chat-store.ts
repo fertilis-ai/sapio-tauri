@@ -6,6 +6,7 @@ import {
   type Context,
   type Api,
   type Model,
+  type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import {
   type ToolCallState,
@@ -29,7 +30,13 @@ import type { AgentLoopEvent } from "@/lib/agentic/types";
 import type { VerbalisAdapterConfig } from "@/lib/agentic/verbalis-agent-adapter";
 import type { GuardrailsConfig } from "@/lib/guardrails/types";
 import { appFetch } from "@/lib/http";
-import { DEFAULT_MODEL_ID, getActiveModels, PROVIDER_API_MAP, PROVIDER_BASE_URL_MAP, type ModelId, type ChatModelId } from "@/lib/models";
+import { getActiveModels, PROVIDER_API_MAP, PROVIDER_BASE_URL_MAP, type ModelId, type ChatModelId } from "@/lib/models";
+import {
+  getEffortCapability,
+  resolveEffortFor,
+  toReasoningOption,
+  type EffortCapability,
+} from "@/lib/reasoning";
 import {
   loadChatTree,
   loadChatByPath,
@@ -59,13 +66,37 @@ function resolveModelObject(
   modelId: string,
   apiKeys: Record<string, string>,
   selectedModels?: import("@/lib/models").ProviderModel[]
-): { modelObj: Model<Api>; provider: string; apiKey: string } | null {
+): {
+  modelObj: Model<Api>;
+  provider: string;
+  apiKey: string;
+  capability: EffortCapability | null;
+} | null {
   const active = getActiveModels(selectedModels);
   const entry = active.find((m) => m.id === modelId);
   if (!entry) return null;
 
   const apiKey = apiKeys[entry.provider as keyof typeof apiKeys];
   if (!apiKey) return null;
+
+  // Reasoning comes from OpenRouter's per-model metadata and nothing else, and
+  // is always stamped onto the model — in both directions.
+  //
+  // Stamping the positive case is what makes the request carry the effort at
+  // all: pi-ai's OpenRouter branch is gated on `model.reasoning`, so a model
+  // built with `reasoning: false` drops the option however the picker looked.
+  //
+  // Overwriting the negative case matters just as much. pi-ai's registry marks
+  // 167 OpenRouter ids `reasoning: true` with a map of its own; for a model that
+  // exposes no discrete levels (93 live ids, 21 of them `mandatory`) that branch
+  // takes its `else` and sends `reasoning: { effort: "none" }`, silently
+  // disabling reasoning on a model the user got no picker for. `reasoning:
+  // false` sends no reasoning parameter instead, leaving the provider default.
+  // Thinking output is unaffected — pi-ai parses it without consulting this flag.
+  const capability = getEffortCapability(entry);
+  const reasoningFields = capability
+    ? { reasoning: true as const, thinkingLevelMap: capability.thinkingLevelMap }
+    : { reasoning: false as const, thinkingLevelMap: undefined };
 
   // Try pi-ai's getModel() first (gives full config with cost/context data)
   const registryModel = getModel(entry.provider as "anthropic", modelId as "claude-sonnet-4-20250514");
@@ -75,6 +106,7 @@ function resolveModelObject(
       return {
         modelObj: {
           ...registryModel,
+          ...reasoningFields,
           headers: { ...registryModel.headers, "Authorization": `Bearer ${apiKey}` },
           compat: {
             supportsStore: false,
@@ -83,9 +115,10 @@ function resolveModelObject(
         },
         provider: entry.provider,
         apiKey,
+        capability,
       };
     }
-    return { modelObj: registryModel, provider: entry.provider, apiKey };
+    return { modelObj: registryModel, provider: entry.provider, apiKey, capability };
   }
 
   const api = PROVIDER_API_MAP[entry.provider];
@@ -105,7 +138,7 @@ function resolveModelObject(
     api: api as Api,
     provider: entry.provider,
     baseUrl,
-    reasoning: false,
+    ...reasoningFields,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
@@ -121,7 +154,7 @@ function resolveModelObject(
     };
   }
 
-  return { modelObj, provider: entry.provider, apiKey };
+  return { modelObj, provider: entry.provider, apiKey, capability };
 }
 
 import type { LocalLlmProvider } from "./settings-store";
@@ -566,7 +599,12 @@ export const useChatStore = create<ChatState>((set, get) => {
       // Helper: run a model through the VerbalisAgentAdapter (Tauri only)
       // Shared by both local and cloud models for consistent tool execution,
       // guardrails, debug logging, and event flow.
-      const runWithAdapter = async (adapterModel: Model<Api>, adapterApiKey: string, adapterIsLocal: boolean) => {
+      const runWithAdapter = async (
+        adapterModel: Model<Api>,
+        adapterApiKey: string,
+        adapterIsLocal: boolean,
+        adapterReasoning?: ThinkingLevel
+      ) => {
         const loopStore = useAgenticLoopStore.getState();
         const guardrailsConfig = guardrailsConfigOverride ?? settings.guardrailsConfig;
 
@@ -743,6 +781,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           systemPrompt,
           apiKey: adapterApiKey,
           temperature,
+          reasoning: adapterReasoning,
           isLocal: adapterIsLocal,
           guardrailsConfig,
           allowedTools,
@@ -854,18 +893,29 @@ export const useChatStore = create<ChatState>((set, get) => {
             messages: updateLastAssistantMessage(c.messages, {
               content: entry
                 ? `Please configure a ${providerName} API key in Settings to use the chat.`
-                : `Unknown model: ${model}. Please select a valid model in Settings.`,
+                : model
+                  ? `Unknown model: ${model}. Please select a valid model in Settings.`
+                  : "No model selected. Choose one under Settings → Models.",
             }),
             updatedAt: new Date(),
           }));
           return;
         }
 
-        const { modelObj, apiKey } = resolved;
+        const { modelObj, apiKey, capability } = resolved;
+
+        // Reasoning effort: per-model preference, falling back to OpenRouter's
+        // own default and clamped to what it says the model accepts. Resolved
+        // from the same capability the picker reads, so the two cannot disagree
+        // — and no capability means no picker, hence nothing to send. "off"
+        // becomes undefined; never forward it to the SDK.
+        const reasoning = capability
+          ? toReasoningOption(resolveEffortFor(capability, settings.modelEffort?.[model]))
+          : undefined;
 
         // Use VerbalisAgentAdapter for tool handling in desktop environment
         if (isTauri()) {
-          await runWithAdapter(modelObj, apiKey, false);
+          await runWithAdapter(modelObj, apiKey, false, reasoning);
         } else {
           // Web-only mode: simple streaming without tool support
           const stream = streamSimple(modelObj, buildContextFromConversation({
@@ -878,6 +928,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           }), {
             apiKey,
             temperature,
+            reasoning,
           });
 
           let fullContent = "";
@@ -940,7 +991,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
     chatTree: [],
     expandedFolders: new Set<string>(),
-    model: useSettingsStore.getState().defaultModel ?? DEFAULT_MODEL_ID,
+    model: useSettingsStore.getState().defaultModel,
     agentId: null,
     isStreaming: false,
     contextBudget: null,
@@ -1480,7 +1531,7 @@ useSettingsStore.subscribe((state, prevState) => {
   if (!active.some((m) => m.id === chatModel)) {
     const fallback = active.some((m) => m.id === state.defaultModel)
       ? state.defaultModel
-      : active[0]?.id ?? DEFAULT_MODEL_ID;
+      : active[0]?.id ?? "";
     useChatStore.setState({ model: fallback });
   }
 });

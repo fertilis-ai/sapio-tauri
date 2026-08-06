@@ -132,6 +132,11 @@ vi.mock("@/lib/message-conversion", () => ({
 vi.mock("@earendil-works/pi-ai", () => ({
   streamSimple: mockStreamSimple,
   getModel: mockGetModel,
+  // Used by lib/reasoning to gate reasoning effort. The mocked model objects
+  // here have no `reasoning` flag, so effort resolves to "off" throughout.
+  getSupportedThinkingLevels: (model: { reasoning?: boolean }) =>
+    model?.reasoning ? ["off", "low", "medium", "high"] : ["off"],
+  clampThinkingLevel: (_model: unknown, level: string) => level,
   // Needed by web-tools param schemas (pulled in via toolbox-schemas → categories).
   StringEnum: (values: readonly string[], options?: Record<string, unknown>) => ({
     ...options,
@@ -147,8 +152,10 @@ vi.mock("@/lib/http", () => ({
 vi.mock("@/lib/models", () => ({
   DEFAULT_MODEL_ID: "claude-sonnet-4-20250514",
   getActiveModels: mockGetActiveModels,
-  PROVIDER_API_MAP: {},
-  PROVIDER_BASE_URL_MAP: {},
+  // Only consulted when pi-ai's registry misses; openrouter is here so the
+  // hand-built fallback model in resolveModelObject can be exercised.
+  PROVIDER_API_MAP: { openrouter: "openai-completions" },
+  PROVIDER_BASE_URL_MAP: { openrouter: "https://openrouter.ai/api/v1" },
 }));
 
 vi.mock("./settings-store", () => ({
@@ -1976,6 +1983,199 @@ describe("chat-store", () => {
 
       const updated = useChatStore.getState().conversations.find((c) => c.id === "c1");
       expect(updated?.title?.length).toBeLessThanOrEqual(50);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Reasoning effort on the outgoing request
+  // -----------------------------------------------------------------------
+  //
+  // Regression guard for a silent-drop failure mode: pi-ai's OpenRouter branch
+  // is gated on `model.reasoning`, so a model reaching streamSimple without it
+  // loses the effort no matter what the picker showed.
+  describe("reasoning effort", () => {
+    const OPENROUTER_MODEL = {
+      id: "x-ai/grok-4.5",
+      name: "Grok 4.5",
+      provider: "openrouter",
+      reasoning: {
+        mandatory: true,
+        supported_efforts: ["high", "medium", "low"],
+        default_effort: "high",
+      },
+    };
+
+    /** The model object handed to streamSimple for the last sendMessage. */
+    const sentModel = () => mockStreamSimple.mock.calls.at(-1)?.[0];
+    /** The options object handed to streamSimple for the last sendMessage. */
+    const sentOptions = () => mockStreamSimple.mock.calls.at(-1)?.[2];
+
+    function setup(overrides: Record<string, unknown> = {}) {
+      mockGetActiveModels.mockReturnValue([OPENROUTER_MODEL]);
+      mockSettingsGetState.mockReturnValue({
+        apiKeys: { openrouter: "sk-or-test" },
+        localLLM: { enabled: false, provider: "lmstudio", baseUrl: "", model: "" },
+        guardrailsConfig: {},
+        selectedModels: [OPENROUTER_MODEL],
+        defaultModel: OPENROUTER_MODEL.id,
+        ...overrides,
+      });
+      mockStreamSimple.mockReturnValue(
+        (async function* () {
+          yield { type: "text_delta", delta: "Hi" };
+        })(),
+      );
+      useChatStore.setState({
+        conversations: [makeConversation({ id: "c1" })],
+        currentConversationId: "c1",
+        model: OPENROUTER_MODEL.id,
+      });
+    }
+
+    it("stamps the capability onto a model the registry already knows", async () => {
+      setup();
+      mockGetModel.mockReturnValue({
+        id: OPENROUTER_MODEL.id,
+        name: "Grok 4.5",
+        api: "openai-completions",
+        provider: "openrouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      });
+
+      await useChatStore.getState().sendMessage("Hello");
+
+      // The registry says reasoning: false; OpenRouter's metadata overrides it.
+      expect(sentModel()?.reasoning).toBe(true);
+      expect(sentModel()?.thinkingLevelMap).toMatchObject({ high: "high", off: null });
+    });
+
+    it("stamps the capability onto a model the registry does not know", async () => {
+      setup();
+      mockGetModel.mockReturnValue(undefined);
+
+      await useChatStore.getState().sendMessage("Hello");
+
+      expect(sentModel()?.reasoning).toBe(true);
+      expect(sentModel()?.thinkingLevelMap).toMatchObject({ high: "high", off: null });
+    });
+
+    it("forwards the stored effort for the model being used", async () => {
+      setup({ modelEffort: { [OPENROUTER_MODEL.id]: "low" } });
+      mockGetModel.mockReturnValue(undefined);
+
+      await useChatStore.getState().sendMessage("Hello");
+
+      expect(sentOptions()?.reasoning).toBe("low");
+    });
+
+    it("falls back to OpenRouter's own default when nothing is stored", async () => {
+      setup();
+      mockGetModel.mockReturnValue(undefined);
+
+      await useChatStore.getState().sendMessage("Hello");
+
+      expect(sentOptions()?.reasoning).toBe("high");
+    });
+
+    // OpenRouter's metadata is the only source of truth. pi-ai's registry carries
+    // `reasoning: true` for 167 OpenRouter ids, and when it leaks through for a
+    // model that exposes no discrete levels, pi-ai's OpenRouter branch falls into
+    // its `else` and sends `reasoning: { effort: "none" }` — silently disabling
+    // reasoning on a model the user was given no picker for.
+    it("does not let the registry enable reasoning OpenRouter never advertised", async () => {
+      // Verbatim shape of deepseek/deepseek-r1: reasoning, but no discrete levels.
+      const noLevels = {
+        id: "deepseek/deepseek-r1",
+        name: "DeepSeek R1",
+        provider: "openrouter",
+        reasoning: { mandatory: true, default_enabled: true },
+      };
+      mockGetActiveModels.mockReturnValue([noLevels]);
+      mockSettingsGetState.mockReturnValue({
+        apiKeys: { openrouter: "sk-or-test" },
+        localLLM: { enabled: false, provider: "lmstudio", baseUrl: "", model: "" },
+        guardrailsConfig: {},
+        selectedModels: [noLevels],
+        defaultModel: noLevels.id,
+      });
+      // The registry's stale, coarser view of the same model.
+      mockGetModel.mockReturnValue({
+        id: noLevels.id,
+        name: "DeepSeek R1",
+        api: "openai-completions",
+        provider: "openrouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        reasoning: true,
+        thinkingLevelMap: { xhigh: "max" },
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 8192,
+      });
+      mockStreamSimple.mockReturnValue(
+        (async function* () {
+          yield { type: "text_delta", delta: "Hi" };
+        })(),
+      );
+      useChatStore.setState({
+        conversations: [makeConversation({ id: "c1" })],
+        currentConversationId: "c1",
+        model: noLevels.id,
+      });
+
+      await useChatStore.getState().sendMessage("Hello");
+
+      expect(sentOptions()?.reasoning).toBeUndefined();
+      // Either of these keeps pi-ai from emitting `reasoning: { effort: "none" }`;
+      // the registry's own map must not survive.
+      expect(sentModel()?.reasoning).toBe(false);
+      expect(sentModel()?.thinkingLevelMap).toBeUndefined();
+    });
+
+    it("leaves a non-reasoning model untouched and sends no effort", async () => {
+      const plain = { id: "gpt-4o", name: "GPT-4o", provider: "openai" };
+      mockGetActiveModels.mockReturnValue([plain]);
+      mockSettingsGetState.mockReturnValue({
+        apiKeys: { openai: "sk-test" },
+        localLLM: { enabled: false, provider: "lmstudio", baseUrl: "", model: "" },
+        guardrailsConfig: {},
+        selectedModels: [plain],
+        defaultModel: plain.id,
+        modelEffort: { "gpt-4o": "high" },
+      });
+      mockGetModel.mockReturnValue({
+        id: "gpt-4o",
+        name: "GPT-4o",
+        api: "openai-completions",
+        provider: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 4096,
+      });
+      mockStreamSimple.mockReturnValue(
+        (async function* () {
+          yield { type: "text_delta", delta: "Hi" };
+        })(),
+      );
+      useChatStore.setState({
+        conversations: [makeConversation({ id: "c1" })],
+        currentConversationId: "c1",
+        model: plain.id,
+      });
+
+      await useChatStore.getState().sendMessage("Hello");
+
+      expect(sentModel()?.reasoning).toBe(false);
+      // A stale stored effort must not resurrect reasoning on a plain model.
+      expect(sentOptions()?.reasoning).toBeUndefined();
     });
   });
 

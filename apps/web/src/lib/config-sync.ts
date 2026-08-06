@@ -13,6 +13,7 @@ import { loadAllApiKeys } from "@/lib/keychain";
 import { setLoggingEnabled } from "@/lib/logger";
 import type { HueId } from "@/lib/hue-presets";
 import type { ChatModelId, ImageProviderModel, ProviderModel } from "@/lib/models";
+import type { EffortLevel } from "@/lib/reasoning";
 import type { GuardrailsConfig } from "@/lib/guardrails/types";
 import type { UserMode, Theme, LocalLlmProvider } from "@/stores/settings-store";
 
@@ -32,6 +33,8 @@ interface ConfigYaml {
   defaultModel: ChatModelId;
   availableModels: ProviderModel[];
   selectedModels: ProviderModel[];
+  /** Per-model reasoning effort, keyed by model id. Sparse — only models the user has set. */
+  modelEffort: Record<string, EffortLevel>;
   imageModel: string;
   availableImageModels: ImageProviderModel[];
   guardrailsConfig: GuardrailsConfig;
@@ -51,6 +54,7 @@ function extractConfigFromStore(): ConfigYaml {
     defaultModel: s.defaultModel,
     availableModels: s.availableModels,
     selectedModels: s.selectedModels,
+    modelEffort: s.modelEffort,
     imageModel: s.imageModel,
     availableImageModels: s.availableImageModels,
     guardrailsConfig: s.guardrailsConfig,
@@ -121,6 +125,10 @@ async function loadConfigFromFile(providedContent?: string): Promise<void> {
       if (parsed.defaultModel !== undefined) store.setDefaultModel(parsed.defaultModel);
       if (parsed.availableModels !== undefined) store.setAvailableModels(parsed.availableModels);
       if (parsed.selectedModels !== undefined) store.setSelectedModels(parsed.selectedModels);
+      // Replace wholesale rather than merging: the file is the source of truth, so a
+      // key deleted there must not be resurrected from the store's current state.
+      if (parsed.modelEffort !== undefined)
+        useSettingsStore.setState({ modelEffort: parsed.modelEffort });
       if (parsed.imageModel !== undefined) store.setImageModel(parsed.imageModel);
       if (parsed.availableImageModels !== undefined) store.setAvailableImageModels(parsed.availableImageModels);
       if (parsed.guardrailsConfig !== undefined) {

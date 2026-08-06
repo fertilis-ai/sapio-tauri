@@ -281,6 +281,34 @@ describe("fetchProviderModels", () => {
       expect(result.models.find((m) => m.id === "meta/llama-3")?.zdr).toBeUndefined();
     });
 
+    it("copies the reasoning capability through, and omits it when absent", async () => {
+      // This object is what gates the chat toolbar's effort picker; dropping it
+      // here silently falls the picker back to pi-ai's coarser registry.
+      const reasoning = {
+        mandatory: true,
+        default_enabled: true,
+        supported_efforts: ["high", "medium", "low"],
+        default_effort: "high",
+      };
+      mockAppFetch.mockImplementation((url: string) => {
+        if (url.includes("/endpoints/zdr")) return Promise.resolve(jsonResponse({ data: [] }));
+        return Promise.resolve(
+          jsonResponse({
+            data: [
+              { id: "x-ai/grok-4.5", name: "Grok 4.5", reasoning },
+              { id: "openai/gpt-4o", name: "GPT-4o" },
+            ],
+          })
+        );
+      });
+
+      const result = await fetchProviderModels("openrouter", "or-key");
+      expect(result.models.find((m) => m.id === "x-ai/grok-4.5")?.reasoning).toEqual(reasoning);
+      const plain = result.models.find((m) => m.id === "openai/gpt-4o");
+      expect(plain).toBeDefined();
+      expect(plain).not.toHaveProperty("reasoning");
+    });
+
     it("tolerates a failed ZDR fetch", async () => {
       mockAppFetch.mockImplementation((url: string) => {
         if (url.includes("/endpoints/zdr")) return Promise.reject(new Error("network down"));
